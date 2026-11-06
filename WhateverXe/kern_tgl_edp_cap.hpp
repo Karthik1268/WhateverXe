@@ -83,6 +83,32 @@ inline uint32_t capLinkCaps(uint32_t address,uint8_t *data,uint32_t length,
 	return changed;
 }
 
+// eDP 1.4 rate select: index in the panel's raw SUPPORTED_LINK_RATES table
+// whose rate equals a standard LINK_BW_SET code, or -1. A panel reporting
+// MAX_LINK_RATE 0 trains only through LINK_RATE_SET (0x115), not LINK_BW_SET.
+inline int tableIndexForCode(const uint8_t *table,uint32_t length,uint8_t code) {
+	if(!table || !standardCode(code))return -1;
+	for(uint32_t i=0;i+1<length && i<16;i+=2) {
+		const auto rate=uint32_t(table[i])|(uint32_t(table[i+1])<<8);
+		if(!rate)break;
+		if(codeForTable(rate)==code)return int(i/2);
+	}
+	return -1;
+}
+
+// Rewrites one donor LINK_BW_SET/LANE_COUNT_SET write [address, address+length)
+// for rate select: out receives the bytes to send, with LINK_BW_SET 0.
+// Returns the LINK_RATE_SET index, or -1 to send the donor's write unchanged.
+inline int rateSelectWrite(uint32_t address,const uint8_t *data,uint32_t length,
+	const uint8_t *table,bool tableValid,bool rawMaxZero,uint8_t *out,uint32_t outLength) {
+	if(!rawMaxZero || !tableValid || address!=0x100 || !data || !length || !out || outLength<length)return -1;
+	const auto index=tableIndexForCode(table,16,data[0]);
+	if(index<0)return -1;
+	for(uint32_t i=0;i<length;++i)out[i]=data[i];
+	out[0]=0;
+	return index;
+}
+
 // True when a read covers any register capLinkCaps may rewrite.
 inline bool coversLinkCaps(uint32_t address,uint32_t length) {
 	const auto covers=[&](uint32_t lo,uint32_t hi) {return length && address<=hi && address+length>lo;};

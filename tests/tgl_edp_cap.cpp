@@ -37,4 +37,18 @@ int main() {
  // A standard, already low panel is untouched.
  uint8_t good[16] {0x12,0x0A,0x84};uint8_t copy[16];memcpy(copy,good,16);
  assert(capLinkCaps(0,good,16,nullptr,false,false)==0 && !memcmp(copy,good,16));
+ // Dell Latitude 7420 panel: MAX_LINK_RATE 0, table 8100/10800/12150/13500.
+ uint8_t dell[16] {};put(dell,0,8100);put(dell,1,10800);put(dell,2,12150);put(dell,3,13500);
+ assert(tableIndexForCode(dell,16,HBR)==3 && tableIndexForCode(dell,16,RBR)==0);
+ assert(tableIndexForCode(dell,16,HBR2)==-1 && tableIndexForCode(dell,16,0x0C)==-1 && tableIndexForCode(nullptr,16,HBR)==-1);
+ uint8_t wanted[2] {0x0A,0x82},out[2] {};
+ assert(rateSelectWrite(0x100,wanted,2,dell,true,true,out,2)==3 && out[0]==0 && out[1]==0x82 && wanted[0]==0x0A);
+ assert(rateSelectWrite(0x100,wanted,2,dell,true,false,out,2)==-1); // panel with a real MAX_LINK_RATE
+ assert(rateSelectWrite(0x100,wanted,2,dell,false,true,out,2)==-1);
+ assert(rateSelectWrite(0x101,wanted,1,dell,true,true,out,2)==-1);
+ assert(rateSelectWrite(0x100,wanted,2,dell,true,true,out,1)==-1);
+ uint8_t hbr2[2] {0x14,0x82};assert(rateSelectWrite(0x100,hbr2,2,dell,true,true,out,2)==-1);
+ // The capped receiver caps of this panel: MAX_LINK_RATE 0 becomes HBR.
+ uint8_t caps0[16] {0x14,0x00,0xC2,0x41};
+ assert(capLinkCaps(0,caps0,16,dell,true,true)==1 && caps0[1]==HBR);
 }

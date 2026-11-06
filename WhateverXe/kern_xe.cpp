@@ -3463,11 +3463,16 @@ void tglDPCDRecord(void *port, uint32_t address, void *data, uint32_t length,
 // receiver caps rewritten to RBR/HBR in the donor's read buffer. 0 off, 1 cap,
 // 2 cap and hide SUPPORTED_LINK_RATES. WhateverXeEDPCap publishes the raw
 // panel values: mode, rewrites, table valid, raw MAX_LINK_RATE, raw extended
-// MAX_LINK_RATE, chosen code, then the raw 16-byte table.
+// MAX_LINK_RATE, chosen code, then the raw 16-byte table; then the eDP 1.4
+// rate-select translations (LINK_BW_SET writes sent as LINK_RATE_SET): count,
+// last requested code, table index and native result.
 struct TGLEDPCapState {
 	uint32_t mode, rewrites, tableValid;
 	uint8_t rawMax, rawExtMax, chosen, pad;
 	uint8_t table[16];
+	uint32_t selectWrites;
+	uint8_t selectCode, selectIndex, pad2[2];
+	uint32_t selectResult;
 };
 static TGLEDPCapState tglEDPCap {};
 
@@ -19261,9 +19266,41 @@ static void tglEDPCapApply(void *port, uint32_t address, void *data, uint32_t le
 			tglEDPCap.rewrites += TGLEDPCap::capLinkCaps(address, bytes, length, tglEDPCap.table,
 				tglEDPCap.tableValid, tglEDPCap.mode == 2);
 			if (address <= 0x001 && address + length > 0x001) tglEDPCap.chosen = bytes[0x001 - address];
+			// After a rate-select write the sink's LINK_BW_SET reads 0; report the
+			// code the donor programmed so its link checks see its own configuration.
+			if (tglEDPCap.selectWrites && address <= 0x100 && address + length > 0x100 && !bytes[0x100 - address])
+				bytes[0x100 - address] = tglEDPCap.selectCode;
 			IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeEDPCap", &tglEDPCap, sizeof(tglEDPCap));
 		}
 	}
+}
+
+// eDP 1.4 panel with MAX_LINK_RATE 0 (-wex-tgl-edp-cap): the donor's
+// LINK_BW_SET/LANE_COUNT_SET write is sent with LINK_BW_SET 0, followed by
+// LINK_RATE_SET with the matching table index, as the firmware and Linux do.
+// The donor's buffer is not modified. Returns false to send the write unchanged.
+static bool tglEDPCapWrite(void *port, uint32_t address, void *data, uint32_t length,
+	mach_vm_address_t org, uint32_t &result) {
+	if (!tglEDPCap.mode || !org || !port || address != 0x100 || !data || !length || length > 16) return false;
+	auto config = *reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(port) + 0x548);
+	if (!config || config[0] != 0) return false;
+	uint8_t out[16] {};
+	const auto index = TGLEDPCap::rateSelectWrite(address, static_cast<uint8_t *>(data), length,
+		tglEDPCap.table, tglEDPCap.tableValid, tglEDPCap.rawMax == 0, out, sizeof(out));
+	if (index < 0) return false;
+	using WriteAUX = uint32_t (*)(void *, uint32_t, void *, uint32_t);
+	auto write = reinterpret_cast<WriteAUX>(org);
+	result = write(port, 0x100, out, length);
+	if (!result) {
+		uint8_t select = static_cast<uint8_t>(index);
+		result = write(port, 0x115, &select, 1);
+	}
+	tglEDPCap.selectWrites++;
+	tglEDPCap.selectCode = static_cast<uint8_t *>(data)[0];
+	tglEDPCap.selectIndex = static_cast<uint8_t>(index);
+	tglEDPCap.selectResult = result;
+	IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeEDPCap", &tglEDPCap, sizeof(tglEDPCap));
+	return true;
 }
 
 uint32_t XE::wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t length) {
@@ -19281,6 +19318,8 @@ uint32_t XE::wrapTGLWriteAUX(void *port, uint32_t address, void *data, uint32_t 
 	auto caller = __builtin_return_address(0);
 	tglDPCDRecord(port, address, data, length, true, false, 0, caller);
 	const auto r = tglInvokeBootstrapAUX(callbackXE->tglBootstrapAUXReady, 1, port, [&] {
+		uint32_t selected = 0;
+		if (tglEDPCapWrite(port, address, data, length, callbackXE->orgTGLWriteAUX, selected)) return selected;
 		return FunctionCast(wrapTGLWriteAUX, callbackXE->orgTGLWriteAUX)(port, address, data, length);
 	});
 	tglDPCDRecord(port, address, data, length, true, true, r, caller);
