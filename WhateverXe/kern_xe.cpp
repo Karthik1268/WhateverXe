@@ -19235,7 +19235,7 @@ void XE::wrapTGLEnablePipe(void *controller, void *fb, void *path, const void *t
 }
 
 // Donor sees RBR/HBR receiver caps on the internal panel (-wex-tgl-edp-cap).
-static void tglEDPCapApply(void *port, uint32_t address, void *data, uint32_t length, uint32_t r) {
+static void tglEDPCapApply(void *port, uint32_t address, void *data, uint32_t length, uint32_t r, mach_vm_address_t org) {
 	if (!r && data && tglEDPCap.mode && TGLEDPCap::coversLinkCaps(address, length)) {
 		auto config = port ? *reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(port) + 0x548) : nullptr;
 		if (config && config[0] == 0) { // DDI A, the internal eDP combo port
@@ -19250,7 +19250,8 @@ static void tglEDPCapApply(void *port, uint32_t address, void *data, uint32_t le
 				// One extra native read of SUPPORTED_LINK_RATES on the same port,
 				// only while a rate code is being reported to the donor.
 				uint8_t table[16] {};
-				if (!FunctionCast(XE::wrapTGLReadAUX, callbackXE->orgTGLReadAUX)(port, 0x10, table, sizeof(table))) {
+				using ReadAUX = uint32_t (*)(void *, uint32_t, void *, uint32_t);
+				if (org && !reinterpret_cast<ReadAUX>(org)(port, 0x10, table, sizeof(table))) {
 					memcpy(tglEDPCap.table, table, sizeof(table));
 					tglEDPCap.tableValid = 1;
 				}
@@ -19272,7 +19273,7 @@ uint32_t XE::wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t l
 		return FunctionCast(wrapTGLReadAUX, callbackXE->orgTGLReadAUX)(port, address, data, length);
 	});
 	tglDPCDRecord(port, address, data, length, false, true, r, caller);
-	tglEDPCapApply(port, address, data, length, r); // raw caps stay in the DPCD records
+	tglEDPCapApply(port, address, data, length, r, callbackXE->orgTGLReadAUX); // raw caps stay in the DPCD records
 	return r;
 }
 
