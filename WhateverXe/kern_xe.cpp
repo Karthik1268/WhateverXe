@@ -48,6 +48,7 @@
 #include "kern_display13_dbuf.hpp"
 #include "kern_display13_wm.hpp"
 #include "kern_tgl_training_scope.hpp"
+#include "kern_tgl_edp_cap.hpp"
 #include "kern_tgl_port_map.hpp"
 #include "kern_adls_clock.hpp"
 #include "kern_adls_boot.hpp"
@@ -3458,8 +3459,21 @@ void tglDPCDRecord(void *port, uint32_t address, void *data, uint32_t length,
 	IOSimpleLockUnlock(tglAUXLock);
 }
 
+// -wex-tgl-edp-cap / -wex-tgl-edp-notable (kern_tgl_edp_cap): internal-panel
+// receiver caps rewritten to RBR/HBR in the donor's read buffer. 0 off, 1 cap,
+// 2 cap and hide SUPPORTED_LINK_RATES. WhateverXeEDPCap publishes the raw
+// panel values: mode, rewrites, table valid, raw MAX_LINK_RATE, raw extended
+// MAX_LINK_RATE, chosen code, then the raw 16-byte table.
+struct TGLEDPCapState {
+	uint32_t mode, rewrites, tableValid;
+	uint8_t rawMax, rawExtMax, chosen, pad;
+	uint8_t table[16];
+};
+static TGLEDPCapState tglEDPCap {};
+
 void tglDPCDPublish() {
 	if (!tglAUXLock) return;
+	if (tglEDPCap.mode) IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeEDPCap", &tglEDPCap, sizeof(tglEDPCap));
 	const size_t size = sizeof(tglDPCDFirst) + sizeof(tglDPCDLast);
 	auto copy = static_cast<uint8_t *>(IOMalloc(size));
 	if (!copy) return;
@@ -12922,6 +12936,8 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 			}
 			tglAUXLock = IOSimpleLockAlloc();
 			tglDisplayTraceEnabled=checkKernelArgument("-wex-display-trace");
+			tglEDPCap.mode=checkKernelArgument("-wex-tgl-edp-notable") ? 2 : checkKernelArgument("-wex-tgl-edp-cap") ? 1 : 0;
+			tglEDPCap.rawMax=tglEDPCap.rawExtMax=0xFF;
    tglInitTransitionTrace(tglDisplayTraceEnabled);
 			if (tglConnectionLock) {
 				KernelPatcher::RouteRequest link("__ZN14AppleIntelPort15checkLinkStatusEv",
@@ -19218,6 +19234,37 @@ void XE::wrapTGLEnablePipe(void *controller, void *fb, void *path, const void *t
 	tglObserveScanout(fb, nullptr, 3, true, 0);
 }
 
+// Donor sees RBR/HBR receiver caps on the internal panel (-wex-tgl-edp-cap).
+static void tglEDPCapApply(void *port, uint32_t address, void *data, uint32_t length, uint32_t r) {
+	if (!r && data && tglEDPCap.mode && TGLEDPCap::coversLinkCaps(address, length)) {
+		auto config = port ? *reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(port) + 0x548) : nullptr;
+		if (config && config[0] == 0) { // DDI A, the internal eDP combo port
+			auto bytes = static_cast<uint8_t *>(data);
+			if (address <= 0x10 && address + length >= 0x20) {
+				memcpy(tglEDPCap.table, bytes + (0x10 - address), 16);
+				tglEDPCap.tableValid = 1;
+			}
+			const bool needsTable = (address <= 0x001 && address + length > 0x001) ||
+				(address <= 0x2201 && address + length > 0x2201);
+			if (needsTable && !tglEDPCap.tableValid) {
+				// One extra native read of SUPPORTED_LINK_RATES on the same port,
+				// only while a rate code is being reported to the donor.
+				uint8_t table[16] {};
+				if (!FunctionCast(XE::wrapTGLReadAUX, callbackXE->orgTGLReadAUX)(port, 0x10, table, sizeof(table))) {
+					memcpy(tglEDPCap.table, table, sizeof(table));
+					tglEDPCap.tableValid = 1;
+				}
+			}
+			if (address <= 0x001 && address + length > 0x001) tglEDPCap.rawMax = bytes[0x001 - address];
+			if (address <= 0x2201 && address + length > 0x2201) tglEDPCap.rawExtMax = bytes[0x2201 - address];
+			tglEDPCap.rewrites += TGLEDPCap::capLinkCaps(address, bytes, length, tglEDPCap.table,
+				tglEDPCap.tableValid, tglEDPCap.mode == 2);
+			if (address <= 0x001 && address + length > 0x001) tglEDPCap.chosen = bytes[0x001 - address];
+			IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeEDPCap", &tglEDPCap, sizeof(tglEDPCap));
+		}
+	}
+}
+
 uint32_t XE::wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t length) {
 	auto caller = __builtin_return_address(0);
 	tglDPCDRecord(port, address, data, length, false, false, 0, caller);
@@ -19225,6 +19272,7 @@ uint32_t XE::wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t l
 		return FunctionCast(wrapTGLReadAUX, callbackXE->orgTGLReadAUX)(port, address, data, length);
 	});
 	tglDPCDRecord(port, address, data, length, false, true, r, caller);
+	tglEDPCapApply(port, address, data, length, r); // raw caps stay in the DPCD records
 	return r;
 }
 

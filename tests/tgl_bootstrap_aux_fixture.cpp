@@ -20,6 +20,7 @@ constexpr uint32_t kIOReturnNotReady=0xe00002d8;
 #include "adapter.inc"
 #define FunctionCast(f,p) reinterpret_cast<decltype(&f)>(p)
 template<class... T> void tglDPCDRecord(T...){}
+template<class... T> void tglEDPCapApply(T...){}
 struct XE {
  bool tglBootstrapAUXReady {};uintptr_t orgTGLReadAUX {},orgTGLWriteAUX {},orgTGLI2CAUX {};
  static uint32_t wrapTGLReadAUX(void*,uint32_t,void*,uint32_t);
